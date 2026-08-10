@@ -6,6 +6,7 @@ const pkgData = require('./package.json')
 
 module.exports = function (app) {
   let child
+  let generation = 0
   function sleep(ms) {
     return new Promise((resolve) => {
       setTimeout(resolve, ms);
@@ -13,9 +14,10 @@ module.exports = function (app) {
   }
   function run_python_plugin(options) {
       let args = ['plugin.py']
-      child = spawn('ve/bin/python', args, { cwd: __dirname })
+      const proc = spawn('ve/bin/python', args, { cwd: __dirname })
+      child = proc
 
-      child.stdout.on('data', data => {
+      proc.stdout.on('data', data => {
         app.debug(data.toString())
         try {
           data.toString().split(/\r?\n/).forEach(line => {
@@ -29,27 +31,36 @@ module.exports = function (app) {
         }
       })
 
-      child.stderr.on('data', fromChild => {
+      proc.stderr.on('data', fromChild => {
         console.error(fromChild.toString())
       })
 
-      child.on('error', err => {
+      proc.on('error', err => {
         console.error(err)
       })
 
-      child.on('close', code => {
+      proc.on('close', code => {
         if (code !== 0) {
           console.warn(`Plugin exited ${code}, restarting...`)
         }
-        child = undefined
+        // A close event from an earlier process must not clear the handle to
+        // the current one, or the loop below would spawn a second scanner.
+        if (child === proc) {
+          child = undefined
+        }
       })
 
-      child.stdin.write(JSON.stringify(options))
-      child.stdin.write('\n')
+      proc.stdin.write(JSON.stringify(options))
+      proc.stdin.write('\n')
   };
   return {
     start: async (options) => {
-      while (true) {
+      // The server restarts a plugin by calling stop() and start() back to
+      // back, and stop() is synchronous, so start() runs before any sleeping
+      // loop can wake up. A boolean flag would already be back to true by
+      // then; the generation counter makes every earlier loop exit instead.
+      const myGeneration = ++generation
+      while (myGeneration === generation) {
         if (child === undefined) {
           run_python_plugin(options);
         }
@@ -57,8 +68,9 @@ module.exports = function (app) {
       }
     },
     stop: () => {
+      generation++
       if (child) {
-        process.kill(child.pid)
+        child.kill()
         child = undefined
       }
     },
